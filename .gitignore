@@ -1,0 +1,6 @@
+/mirakl-*.gem
+/Gemfile.lock
+.ruby-version
+Gemfile.lock
+tags
+/.bundle/
