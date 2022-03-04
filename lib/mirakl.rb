@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
-# Stripe Ruby bindings
-# API spec at https://stripe.com/docs/api
+# Mirakl Ruby bindings
 require "cgi"
 require "faraday"
 require "json"
@@ -16,9 +15,18 @@ require "mirakl/version"
 # API operations
 require "mirakl/api_operations/request"
 
+# Resources
+require "mirakl/requests/dr11"
+require "mirakl/requests/dr74"
+require "mirakl/requests/s07"
+require "mirakl/requests/s20"
+
 # API resource support classes
 require "mirakl/util"
+require "mirakl/errors"
+require "mirakl/mirakl_response"
 require "mirakl/mirakl_client"
+require "mirakl/mirakl_object"
 
 
 

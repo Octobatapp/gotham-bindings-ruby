@@ -10,6 +10,87 @@ module Mirakl
       :api_key,
     ].freeze
 
+    # Options that should be copyable from one StripeObject to another
+    # including options that may be internal.
+    OPTS_COPYABLE = (
+      OPTS_USER_SPECIFIED + Set[:api_base]
+    ).freeze
+
+    # Options that should be persisted between API requests. This includes
+    # client, which is an object containing an HTTP client to reuse.
+    OPTS_PERSISTABLE = (
+      OPTS_USER_SPECIFIED + Set[:client]
+    ).freeze
+
+    # Converts a hash of fields or an array of hashes into a +MiraklObject+ or
+    # array of +MiraklObject+s.
+    #
+    # ==== Attributes
+    #
+    # * +data+ - Hash of fields and values to be converted into a MiraklObject.
+    # * +opts+ - Options for +MiraklObject+ like an API key that will be reused
+    #   on subsequent API calls.
+    def self.convert_to_mirakl_object(data, opts = {})
+      opts = normalize_opts(opts)
+
+      case data
+      when Array
+        data.map { |i| convert_to_mirakl_object(i, opts) }
+      when Hash
+        data
+        # Try converting to a known object class.  If none available, fall back
+        # to generic StripeObject
+        # MiraklObject.construct_from(data, opts)
+      else
+        data
+      end
+    end
+
+
+    def self.log_error(message, data = {})
+      if !Mirakl.logger.nil? ||
+         !Mirakl.log_level.nil? && Mirakl.log_level <= Mirakl::LEVEL_ERROR
+        log_internal(message, data, color: :cyan, level: Mirakl::LEVEL_ERROR,
+                                    logger: Mirakl.logger, out: $stderr)
+      end
+    end
+
+    def self.log_info(message, data = {})
+      if !Mirakl.logger.nil? ||
+         !Mirakl.log_level.nil? && Mirakl.log_level <= Mirakl::LEVEL_INFO
+        log_internal(message, data, color: :cyan, level: Mirakl::LEVEL_INFO,
+                                    logger: Mirakl.logger, out: $stdout)
+      end
+    end
+
+    def self.log_debug(message, data = {})
+      if !Mirakl.logger.nil? ||
+         !Mirakl.log_level.nil? && Mirakl.log_level <= Mirakl::LEVEL_DEBUG
+        log_internal(message, data, color: :blue, level: Mirakl::LEVEL_DEBUG,
+                                    logger: Mirakl.logger, out: $stdout)
+      end
+    end
+
+    def self.symbolize_names(object)
+      case object
+      when Hash
+        new_hash = {}
+        object.each do |key, value|
+          key = (begin
+                   key.to_sym
+                 rescue StandardError
+                   key
+                 end) || key
+          new_hash[key] = symbolize_names(value)
+        end
+        new_hash
+      when Array
+        object.map { |value| symbolize_names(value) }
+      else
+        object
+      end
+    end
+
     # Encodes a hash of parameters in a way that's suitable for use as query
     # parameters in a URI or as form parameters in a request body. This mainly
     # involves escaping special characters from parameter keys and values (e.g.
@@ -100,5 +181,102 @@ module Mirakl
         new_headers[k] = v
       end
     end
+
+    #
+    # private
+    #
+
+    COLOR_CODES = {
+      black:   0, light_black:   60,
+      red:     1, light_red:     61,
+      green:   2, light_green:   62,
+      yellow:  3, light_yellow:  63,
+      blue:    4, light_blue:    64,
+      magenta: 5, light_magenta: 65,
+      cyan:    6, light_cyan:    66,
+      white:   7, light_white:   67,
+      default: 9,
+    }.freeze
+    private_constant :COLOR_CODES
+
+    # Uses an ANSI escape code to colorize text if it's going to be sent to a
+    # TTY.
+    def self.colorize(val, color, isatty)
+      return val unless isatty
+
+      mode = 0 # default
+      foreground = 30 + COLOR_CODES.fetch(color)
+      background = 40 + COLOR_CODES.fetch(:default)
+
+      "\033[#{mode};#{foreground};#{background}m#{val}\033[0m"
+    end
+    private_class_method :colorize
+
+    # Turns an integer log level into a printable name.
+    def self.level_name(level)
+      case level
+      when LEVEL_DEBUG then "debug"
+      when LEVEL_ERROR then "error"
+      when LEVEL_INFO  then "info"
+      else level
+      end
+    end
+    private_class_method :level_name
+
+    # TODO: Make these named required arguments when we drop support for Ruby
+    # 2.0.
+    def self.log_internal(message, data = {}, color: nil, level: nil,
+                          logger: nil, out: nil)
+      data_str = data.reject { |_k, v| v.nil? }
+                     .map do |(k, v)|
+        format("%<key>s=%<value>s",
+               key: colorize(k, color, logger.nil? && !out.nil? && out.isatty),
+               value: wrap_logfmt_value(v))
+      end.join(" ")
+
+      if !logger.nil?
+        # the library's log levels are mapped to the same values as the
+        # standard library's logger
+        logger.log(level,
+                   format("message=%<message>s %<data_str>s",
+                          message: wrap_logfmt_value(message),
+                          data_str: data_str))
+      elsif out.isatty
+        out.puts format("%<level>s %<message>s %<data_str>s",
+                        level: colorize(level_name(level)[0, 4].upcase,
+                                        color, out.isatty),
+                        message: message,
+                        data_str: data_str)
+      else
+        out.puts format("message=%<message>s level=%<level>s %<data_str>s",
+                        message: wrap_logfmt_value(message),
+                        level: level_name(level),
+                        data_str: data_str)
+      end
+    end
+    private_class_method :log_internal
+
+    # Wraps a value in double quotes if it looks sufficiently complex so that
+    # it can be read by logfmt parsers.
+    def self.wrap_logfmt_value(val)
+      # If value is any kind of number, just allow it to be formatted directly
+      # to a string (this will handle integers or floats).
+      return val if val.is_a?(Numeric)
+
+      # Hopefully val is a string, but protect in case it's not.
+      val = val.to_s
+
+      if %r{[^\w\-/]} =~ val
+        # If the string contains any special characters, escape any double
+        # quotes it has, remove newlines, and wrap the whole thing in quotes.
+        format(%("%<value>s"), value: val.gsub('"', '\"').delete("\n"))
+      else
+        # Otherwise use the basic value if it looks like a standard set of
+        # characters (and allow a few special characters like hyphens, and
+        # slashes)
+        val
+      end
+    end
+    private_class_method :wrap_logfmt_value
   end
 end

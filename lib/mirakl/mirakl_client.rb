@@ -29,7 +29,6 @@ module Mirakl
     # HTTP_UNSUPPORTED_MEDIA_TYPE_CODE = 415
     # HTTP_TOO_MANY_REQUESTS_CODE = 429
 
-    API_ENDPOINT = 'https://octobat-dev.mirakl.net/api/'.freeze
 
     attr_accessor :conn
 
@@ -44,19 +43,20 @@ module Mirakl
 
     def self.default_client
       Thread.current[:mirakl_default_client] ||=
-        MiraklApi::Client.new(default_conn)
+        Mirakl::MiraklClient.new(default_conn)
     end
 
     # A default Faraday connection to be used when one isn't configured. This
     # object should never be mutated, and instead instantiating your own
-    # connection and wrapping it in a MiraklApi::Client object should be preferred.
+    # connection and wrapping it in a Mirakl::MiraklClient object should be preferred.
     def self.default_conn
       # We're going to keep connections around so that we can take advantage
       # of connection re-use, so make sure that we have a separate connection
       # object per thread.
       Thread.current[:mirakl_client_default_conn] ||= begin
         conn = Faraday.new do |builder|
-          builder.use Faraday::Request::Multipart
+          builder.request :multipart, flat_encode: true
+          # builder.use Faraday::Request::Multipart,
           builder.use Faraday::Request::UrlEncoded
           builder.use Faraday::Response::RaiseError
 
@@ -70,9 +70,9 @@ module Mirakl
         end
 
 
-        # if MiraklApi.verify_ssl_certs
+        # if Mirakl.verify_ssl_certs
         #   conn.ssl.verify = true
-        #   conn.ssl.cert_store = MiraklApi.ca_store
+        #   conn.ssl.cert_store = Mirakl.ca_store
         # else
         #   conn.ssl.verify = false
         #
@@ -80,7 +80,7 @@ module Mirakl
         #     @verify_ssl_warned = true
         #     warn("WARNING: Running without SSL cert verification. " \
         #       "You should never do this in production. " \
-        #       "Execute `MiraklApi.verify_ssl_certs = true` to enable " \
+        #       "Execute `Mirakl.verify_ssl_certs = true` to enable " \
         #       "verification.")
         #   end
         # end
@@ -145,14 +145,26 @@ module Mirakl
 
       headers = request_headers(api_key)
                 .update(Util.normalize_headers(headers))
+
+      Util.log_debug("HEADERS:",
+                     headers: headers)
+
+
       params_encoder = FaradayMiraklEncoder.new
       url = api_url(path, api_base)
+
+      if !body.nil?
+        Util.log_debug("BODY:",
+                     body: body,
+                      bodyencoded: params_encoder.encode(body))
+      end
 
       # stores information on the request we're about to make so that we don't
       # have to pass as many parameters around for logging.
       context = RequestLogContext.new
       context.api_key         = api_key
       context.body            = body ? params_encoder.encode(body) : nil
+      # context.body            = body ? body : nil
       context.method          = method
       context.path            = path
       context.query_params    = if query_params
@@ -163,6 +175,10 @@ module Mirakl
       # `FaradayMiraklEncoder`
       http_resp = execute_request_with_rescues(api_base, context) do
         conn.run_request(method, url, body, headers) do |req|
+
+          Util.log_debug("BODYSOUP:",
+                         body: body)
+
           req.options.open_timeout = Mirakl.open_timeout
           req.options.params_encoder = params_encoder
           req.options.timeout = Mirakl.read_timeout
@@ -171,16 +187,22 @@ module Mirakl
       end
 
       begin
-        ap http_resp
-        # resp = StripeResponse.from_faraday_response(http_resp)
+        resp = MiraklResponse.from_faraday_response(http_resp)
       rescue JSON::ParserError
         raise general_api_error(http_resp.status, http_resp.body)
       end
 
-      # Allows StripeClient#request to return a response object to a caller.
+      # Allows MiraklClient#request to return a response object to a caller.
       @last_response = resp
       [resp, api_key]
     end
+
+    private def general_api_error(status, body)
+      APIError.new("Invalid response object from API: #{body.inspect} " \
+                   "(HTTP response code was #{status})",
+                   http_status: status, http_body: body)
+    end
+
 
 
     # Used to workaround buggy behavior in Faraday: the library will try to
@@ -256,11 +278,11 @@ module Mirakl
           log_response_error(error_context, e)
         end
 
-        if self.class.should_retry?(e, num_retries)
-          num_retries += 1
-          sleep self.class.sleep_time(num_retries)
-          retry
-        end
+        # if self.class.should_retry?(e, num_retries)
+        #   num_retries += 1
+        #   sleep self.class.sleep_time(num_retries)
+        #   retry
+        # end
 
         case e
         when Faraday::ClientError
@@ -280,7 +302,97 @@ module Mirakl
       resp
     end
 
+
+    private def handle_error_response(http_resp, context)
+      begin
+        resp = MiraklResponse.from_faraday_hash(http_resp)
+        Util.log_debug("RESP:",
+                       resp: resp.data)
+
+        error_data = resp.data
+
+        raise MiraklError, "Indeterminate error" unless error_data
+      rescue JSON::ParserError
+        raise general_api_error(http_resp[:status], http_resp[:body])
+      end
+
+      error = specific_api_error(resp, error_data, context)
+
+      error.response = resp
+      raise(error)
+    end
+
+    private def specific_api_error(resp, error_data, context)
+      Util.log_error("Mirakl API error",
+                     status: resp.http_status,
+                     error_data: error_data)
+
+      # The standard set of arguments that can be used to initialize most of
+      # the exceptions.
+      opts = {
+        http_body: resp.http_body,
+        http_headers: resp.http_headers,
+        http_status: resp.http_status,
+        json_body: resp.data,
+      }
+
+      case resp.http_status
+      when 400, 404
+        if resp.data.key?(:errors)
+          InvalidRequestError.new(
+            resp.data[:errors][0][:message], resp.data[:errors][0][:field],
+            opts
+          )
+        else
+          APIError.new(resp.data[:message], opts)
+        end
+      when 401
+        AuthenticationError.new(resp.data[:message], opts)
+      when 403
+        PermissionError.new(resp.data[:message], opts)
+      when 429
+        RateLimitError.new(resp.data[:message], opts)
+      else
+        APIError.new(resp.data[:message], opts)
+      end
+    end
+
+
+    private def handle_network_error(error, context, num_retries,
+                                     api_base = nil)
+      Util.log_error("Mirakl network error",
+                     error_message: error.message)
+
+      case error
+      when Faraday::ConnectionFailed
+        message = "Unexpected error communicating when trying to connect to " \
+          "Mirakl. You may be seeing this message because your DNS is not " \
+          "working.  To check, try running `host mirakl.com` from the " \
+          "command line."
+
+      when Faraday::SSLError
+        message = "Could not establish a secure connection to Mirakl, you " \
+          "may need to upgrade your OpenSSL version. To check, try running " \
+          "`openssl s_client -connect api.mirakl.com:443` from the command " \
+          "line."
+
+      when Faraday::TimeoutError
+        api_base ||= Mirakl.api_base
+        message = "Could not connect to Mirakl (#{api_base}). " \
+          "Please check your internet connection and try again."
+
+      else
+        message = "Unexpected error communicating with Mirakl."
+
+      end
+
+      raise APIConnectionError,
+            message + "\n\n(Network error: #{error.message})"
+    end
+
     private def request_headers(api_key)
+      user_agent = "Mirakl/vX RubyBindings/#{Mirakl::VERSION}"
+
       headers = {
         "User-Agent" => user_agent,
         "Authorization" => "#{api_key}",
@@ -317,7 +429,6 @@ module Mirakl
 
     private def log_response_error(context, error)
       Util.log_error("Request error",
-                     elapsed: Time.now - request_start,
                      error_message: error.message,
                      method: context.method,
                      path: context.path)
@@ -338,7 +449,7 @@ module Mirakl
       # context information because a response that we've received from the API
       # contains information that's more authoritative than what we started
       # with for a request. For example, we should trust whatever came back in
-      # a `Stripe-Version` header beyond what configuration information that we
+      # a `Mirakl-Version` header beyond what configuration information that we
       # might have had available.
       def dup_from_response(resp)
         return self if resp.nil?
