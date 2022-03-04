@@ -248,7 +248,7 @@ module Mirakl
           'Set your API key using "Mirakl.api_key = <API-KEY>". '
       end
 
-      return unless api_key =~ /\s/
+      return unless api_key =~ /^\s/
 
       raise AuthenticationError, "Your API key is invalid, as it contains " \
         "whitespace. (HINT: You can double-check your API key from the " \
