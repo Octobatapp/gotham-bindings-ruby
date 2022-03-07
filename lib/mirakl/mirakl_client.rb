@@ -123,7 +123,7 @@ module Mirakl
       when :get, :head, :delete
         query_params = params
       else
-        body = params
+        body = params.to_json
       end
 
       # This works around an edge case where we end up with both query
