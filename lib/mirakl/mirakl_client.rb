@@ -156,14 +156,17 @@ module Mirakl
       if !body.nil?
         Util.log_debug("BODY:",
                      body: body,
-                      bodyencoded: params_encoder.encode(body))
+                      bodyencoded: body.to_json)
+
+
+        body = body.to_json if headers['Content-Type'] == 'application/json'
       end
 
       # stores information on the request we're about to make so that we don't
       # have to pass as many parameters around for logging.
       context = RequestLogContext.new
       context.api_key         = api_key
-      context.body            = body ? params_encoder.encode(body).to_json : nil
+      context.body            = body ? body : nil # TODO : Refactor this.
       # context.body            = body ? body : nil
       context.method          = method
       context.path            = path
