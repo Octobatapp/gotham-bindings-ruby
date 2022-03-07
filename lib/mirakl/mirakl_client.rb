@@ -123,7 +123,7 @@ module Mirakl
       when :get, :head, :delete
         query_params = params
       else
-        body = params.to_json
+        body = params
       end
 
       # This works around an edge case where we end up with both query
@@ -163,7 +163,7 @@ module Mirakl
       # have to pass as many parameters around for logging.
       context = RequestLogContext.new
       context.api_key         = api_key
-      context.body            = body ? params_encoder.encode(body) : nil
+      context.body            = body ? params_encoder.encode(body).to_json : nil
       # context.body            = body ? body : nil
       context.method          = method
       context.path            = path
