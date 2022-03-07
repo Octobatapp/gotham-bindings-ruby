@@ -396,7 +396,7 @@ module Mirakl
       headers = {
         "User-Agent" => user_agent,
         "Authorization" => "#{api_key}",
-        "Content-Type" => "application/x-www-form-urlencoded",
+        "Content-Type" => "application/json",
       }
 
       headers
