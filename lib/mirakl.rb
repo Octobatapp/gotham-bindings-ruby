@@ -17,6 +17,7 @@ require "mirakl/api_operations/request"
 
 # Resources
 require "mirakl/requests/dr11"
+require "mirakl/requests/dr12"
 require "mirakl/requests/dr74"
 require "mirakl/requests/s07"
 require "mirakl/requests/s20"
